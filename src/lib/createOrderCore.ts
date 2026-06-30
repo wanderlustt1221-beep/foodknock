@@ -14,6 +14,9 @@
 //   5. Loyalty point redemption (server-validated, ObjectId-safe)
 //   6. Order document creation
 //   7. Telegram admin notification
+//   8. Order confirmation email (customer, when an email is available)
+//   9. Admin new-order alert email
+//  10. Order-placed transactional push notification (logged-in users only)
 //
 // FIX: razorpayPaymentId / razorpayOrderId are NEVER written as null.
 //      For COD orders these fields are completely omitted from orderData so
@@ -42,6 +45,8 @@ import {
     LOYALTY_CONFIG,
     pointsToRupees,
 } from "@/lib/loyaltyService";
+import { sendOrderConfirmationEmail, sendAdminOrderAlertEmail } from "@/lib/mailer";
+import { notificationEngine } from "@/lib/notifications";
 
 import { COD_MAX_ORDER_AMOUNT } from "@/lib/constants";
 
@@ -388,6 +393,84 @@ export async function createOrderCore(
         loyaltyPointsRedeemed:      pointsToDeduct,
         loyaltyAmountSaved:         redeemedAmount,
     }).catch(console.error);
+
+    // ── Order-placed transactional push notification ──────────────────────
+    // Only logged-in users have push subscriptions tied to their account
+    // (guest checkout has no user to target — never broadcast this event).
+    // Fire-and-forget with error isolation, same pattern as Telegram above:
+    // a push failure must never affect order creation or the response.
+    if (linkedUserId) {
+        try {
+            notificationEngine.emit({
+                name: "order.placed",
+                data: { orderId: newOrderId },
+                target: { userId: linkedUserId },
+            });
+        } catch (pushErr) {
+            console.error("ORDER_PLACED_PUSH_ERROR", pushErr);
+        }
+    }
+
+    // ── Customer email lookup (shared by confirmation + admin alert) ──────
+    // Only resolved when we actually have a linkedUserId — guest checkout
+    // (linkedUserId === null, Razorpay only) never collects an email on the
+    // checkout form, so there is nothing to resolve in that case. One query,
+    // reused by both downstream emails below.
+    const customerEmailPromise: Promise<string | undefined> = linkedUserId
+        ? User.findById(linkedUserId)
+              .select("email")
+              .lean()
+              .then((freshUser: { email?: string } | null) => freshUser?.email)
+              .catch((err) => {
+                  console.error("CUSTOMER_EMAIL_LOOKUP_ERROR", err);
+                  return undefined;
+              })
+        : Promise.resolve(undefined);
+
+    // ── Order confirmation email (customer) ────────────────────────────────
+    // Only sent when we actually have an email to send to. Fire-and-forget:
+    // a failed/skipped email must never affect the order response.
+    customerEmailPromise
+        .then((customerEmail) => {
+            if (!customerEmail) return;
+            return sendOrderConfirmationEmail(customerEmail, {
+                customerName,
+                orderId:       newOrderId,
+                items:         finalItems.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+                totalAmount,
+                deliveryFee,
+                platformFee:   PLATFORM_FEE,
+                address:       orderData.address as string,
+                orderType,
+                paymentMethod,
+                createdAt:     (order as unknown as { createdAt?: Date }).createdAt ?? new Date(),
+            });
+        })
+        .catch((err) => console.error("ORDER_CONFIRMATION_EMAIL_ERROR", err));
+
+    // ── Admin new-order alert email ────────────────────────────────────────
+    customerEmailPromise
+        .then((customerEmail) =>
+            sendAdminOrderAlertEmail({
+                orderId:         newOrderId,
+                customerName,
+                customerEmail,
+                phone,
+                address:         orderData.address as string,
+                landmark,
+                note,
+                orderType,
+                totalAmount,
+                deliveryFee,
+                platformFee:     PLATFORM_FEE,
+                redeemedPoints:  verifiedRedeemPoints,
+                redeemedAmount,
+                paymentMethod,
+                items:           finalItems.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+                createdAt:       (order as unknown as { createdAt?: Date }).createdAt ?? new Date(),
+            })
+        )
+        .catch((err) => console.error("ADMIN_ORDER_ALERT_EMAIL_ERROR", err));
 
     return {
         orderId:                    newOrderId,

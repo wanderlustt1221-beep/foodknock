@@ -4,14 +4,23 @@
 // Flow:
 //   Admin selects file → browser POSTs multipart/form-data here
 //   → we upload to Cloudinary → return secure_url
-//   → ProductForm stores the URL (not the binary) in state
-//   → On save, the URL is sent to /api/products (POST/PATCH)
+//   → caller stores the URL (not the binary) in state
+//   → On save, the URL is sent to the relevant API (products, or now
+//     notifications — see Feature 3 Part 2 below)
 //
 // This completely eliminates base64 storage in MongoDB:
 //   BEFORE: image field = "data:image/jpeg;base64,/9j/4AAQ..." (50–500 KB per doc)
 //   AFTER:  image field = "https://res.cloudinary.com/…/product.jpg" (60 chars)
 //
 // Admin-only: requires valid JWT with role === "admin"
+//
+// Feature 3, Part 2: reused as-is for Notification Studio image uploads
+// (food images, offer/festival/coupon/combo banners) — NOT a new upload
+// system. The only addition is an optional `folder` form field so
+// notification images land in their own Cloudinary folder rather than
+// mixing into "foodknock/products". Every existing caller that doesn't
+// send `folder` gets the exact same "foodknock/products" behavior as
+// before this was added.
 
 import { NextRequest, NextResponse } from "next/server";
 import { v2 as cloudinary }          from "cloudinary";
@@ -27,6 +36,12 @@ cloudinary.config({
     api_key:    process.env.CLOUDINARY_API_KEY!,
     api_secret: process.env.CLOUDINARY_API_SECRET!,
 });
+
+// Folders this endpoint is allowed to upload into. Allowlisted rather than
+// accepting any caller-supplied string, so a malformed/malicious `folder`
+// value can never write into an arbitrary Cloudinary path.
+const ALLOWED_FOLDERS = ["foodknock/products", "foodknock/notifications"] as const;
+const DEFAULT_FOLDER = "foodknock/products";
 
 // ─── Auth guard ───────────────────────────────────────────────────────────
 async function assertAdmin(req: NextRequest): Promise<string | null> {
@@ -79,6 +94,12 @@ export async function POST(req: NextRequest) {
         );
     }
 
+    // 2b. Resolve target folder — defaults to the original hardcoded value.
+    const requestedFolder = formData.get("folder");
+    const folder = (ALLOWED_FOLDERS as readonly string[]).includes(String(requestedFolder))
+        ? String(requestedFolder)
+        : DEFAULT_FOLDER;
+
     // 3. Validate file type
     const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
     if (!allowedTypes.includes(file.type)) {
@@ -105,7 +126,7 @@ export async function POST(req: NextRequest) {
     // 6. Upload to Cloudinary
     try {
         const result = await cloudinary.uploader.upload(dataUri, {
-            folder:         "foodknock/products",
+            folder,
             resource_type:  "image",
             // Auto-optimise: convert to WebP, quality auto
             transformation: [

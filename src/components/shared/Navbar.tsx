@@ -9,7 +9,7 @@ import {
     ShoppingCart, LogOut, Loader2, LayoutDashboard,
     UtensilsCrossed, User, Star, Phone, ChevronRight, X,
     ClipboardList, Home, Gift, LogIn, Award, MessageSquare,
-    Download, Zap,
+    Download, Zap, Bell,
 } from "lucide-react";
 import { useCartStore } from "@/store/cartStore";
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -257,6 +257,14 @@ function AccountSheet({
                                 onClick={onClose}
                             />
                         )}
+                        {authState === "authenticated" && (
+                            <SheetRow
+                                href="/notifications"
+                                icon={<Bell size={15} />}
+                                label="Notifications"
+                                onClick={onClose}
+                            />
+                        )}
                         <SheetRow
                             href="/review-rewards"
                             icon={<MessageSquare size={15} />}
@@ -498,6 +506,7 @@ export default function Navbar() {
     const [loggingOut, setLoggingOut] = useState(false);
     const [sheetOpen, setSheetOpen] = useState(false);
     const [loyaltyBalance, setLoyaltyBalance] = useState<number | null>(null);
+    const [unreadNotifications, setUnreadNotifications] = useState(0);
     const [pwaPrompt, setPwaPrompt] = useState<BeforeInstallPromptEvent | null>(null);
     const router = useRouter();
 
@@ -541,6 +550,23 @@ export default function Navbar() {
         } catch { }
     }, []);
 
+    // Reuses the existing GET /api/notifications endpoint — its response
+    // already includes `unreadCount` (see inboxQuery.ts's fetchUnreadCount,
+    // already wired into that route for the /notifications page itself).
+    // No new endpoint, no duplicated counting logic — same data source,
+    // just also read here for the navbar's badge.
+    const fetchUnreadNotifications = useCallback(async () => {
+        try {
+            const res = await fetch("/api/notifications", { credentials: "include" });
+            if (res.ok) {
+                const json = await res.json();
+                if (json.success && typeof json.unreadCount === "number") {
+                    setUnreadNotifications(json.unreadCount);
+                }
+            }
+        } catch { }
+    }, []);
+
     useEffect(() => {
         setMounted(true);
         fetchMe();
@@ -575,8 +601,9 @@ export default function Navbar() {
     useEffect(() => {
         if (authState === "authenticated") {
             fetchLoyalty();
+            fetchUnreadNotifications();
         }
-    }, [authState, fetchLoyalty]);
+    }, [authState, fetchLoyalty, fetchUnreadNotifications]);
 
     const navLinks = [
         ...baseNavLinks.slice(0, 2),
@@ -636,6 +663,21 @@ export default function Navbar() {
                         </div>
                     )}
                 </div>
+                <Link
+                    href="/notifications"
+                    aria-label={`Notifications${unreadNotifications > 0 ? `, ${unreadNotifications} unread` : ""}`}
+                    className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-stone-200 bg-white/80 text-stone-400 shadow-sm transition-all hover:border-orange-300 hover:bg-orange-50 hover:text-orange-500"
+                >
+                    <Bell size={15} strokeWidth={2} />
+                    {unreadNotifications > 0 && (
+                        <span
+                            className="absolute -right-1 -top-1 flex h-[17px] min-w-[17px] items-center justify-center rounded-full px-1 text-[9px] font-black text-white"
+                            style={{ background: "linear-gradient(135deg, #FF5C1A 0%, #FF8C42 100%)" }}
+                        >
+                            {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                        </span>
+                    )}
+                </Link>
                 <button
                     onClick={handleLogout}
                     disabled={loggingOut}
@@ -773,6 +815,26 @@ export default function Navbar() {
                                     Live Kitchen
                                 </span>
                             </div>
+
+                            {/* Mobile notification bell — only shown when authenticated, mirrors /notifications' own auth gate */}
+                            {authState === "authenticated" && (
+                                <Link
+                                    href="/notifications"
+                                    aria-label={`Notifications${unreadNotifications > 0 ? `, ${unreadNotifications} unread` : ""}`}
+                                    className="relative flex h-9 w-9 items-center justify-center rounded-xl border bg-white/80 text-stone-600 backdrop-blur-sm transition-all hover:text-orange-500"
+                                    style={{ borderColor: "rgba(214,211,208,0.7)" }}
+                                >
+                                    <Bell size={17} strokeWidth={2} />
+                                    {unreadNotifications > 0 && (
+                                        <span
+                                            className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[9px] font-black text-white"
+                                            style={{ background: "linear-gradient(135deg, #FF5C1A 0%, #FF8C42 100%)" }}
+                                        >
+                                            {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                                        </span>
+                                    )}
+                                </Link>
+                            )}
 
                             {/* Mobile cart icon in header */}
                             <Link

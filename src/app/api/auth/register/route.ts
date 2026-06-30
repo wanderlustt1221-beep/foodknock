@@ -1,34 +1,38 @@
-
 // src/app/api/auth/register/route.ts
-// Updated: generates unique referralCode + records referredBy on signup.
-// Self-referral guard: rejects any attempt to use one's own referral code.
+// Step 1 of the OTP-gated signup flow.
 //
-// NOTE: firstDeliveryFreeUsed is intentionally NOT set here.
-// The User model defaults it to false, which is correct for new users.
-// Eligibility is gated by deliveredOrderCount === 0 in the helper, so
-// new users automatically qualify without any extra field on registration.
+// IMPORTANT: this route no longer creates a User. It validates input,
+// checks for duplicate email/phone against existing Users, runs the
+// self-referral guard, stores the registration data (with an already-
+// hashed password) in a PendingSignup record, and emails the first OTP.
+//
+// The actual User document is created only in verify-signup-otp, after the
+// OTP is successfully verified — see that route for account creation,
+// referrer resolution, and auto-login.
+//
+// Rate limiting (60s resend cooldown, 5 requests/hour) is enforced here via
+// the same atomic-update pattern used by the forgot-password flow, since a
+// user can resubmit this form multiple times before completing OTP
+// verification.
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { connectDB } from "@/lib/db";
 import User from "@/models/User";
-import { hashPassword, signToken } from "@/lib/auth";
-
-// ── Referral code generator ────────────────────────────────────────────────
-function generateReferralCode(name: string): string {
-    const prefix = name.trim().toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3) || "USR";
-    const suffix = Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
-    return `${prefix}${suffix}`.slice(0, 8).padEnd(8, "X");
-}
-
-async function uniqueReferralCode(name: string): Promise<string> {
-    let code     = generateReferralCode(name);
-    let attempts = 0;
-    while (await User.exists({ referralCode: code })) {
-        code = generateReferralCode(name + attempts++);
-    }
-    return code;
-}
+import PendingSignup from "@/models/PendingSignup";
+import { hashPassword } from "@/lib/auth";
+import { resolveReferrer } from "@/lib/referral";
+import { sendSignupOtpEmail } from "@/lib/mailer";
+import { notificationEngine } from "@/lib/notifications";
+import { buildOtpRequestedPayload } from "@/lib/notifications/transactionalTemplates";
+import {
+    generateOtp,
+    hashOtp,
+    OTP_EXPIRY_MINUTES,
+    OTP_MAX_REQUESTS_PER_HOUR,
+    OTP_RESEND_COOLDOWN_SECONDS,
+    shouldResetRequestWindow,
+} from "@/lib/otp";
 
 // ── Validation ─────────────────────────────────────────────────────────────
 const registerSchema = z.object({
@@ -77,10 +81,12 @@ export async function POST(req: Request) {
             );
         }
 
+        const email = parsed.data.email.toLowerCase();
+
         await connectDB();
 
-        // ── Duplicate email check ─────────────────────────────────────────
-        const existingUser = await User.findOne({ email: parsed.data.email.toLowerCase() });
+        // ── Duplicate email check (against real Users) ────────────────────
+        const existingUser = await User.findOne({ email });
         if (existingUser) {
             return NextResponse.json(
                 { success: false, message: "Email already exists" },
@@ -88,79 +94,142 @@ export async function POST(req: Request) {
             );
         }
 
-        // ── Resolve referrer + self-referral guard ────────────────────────
-        let referrerId: string | null = null;
-
-        if (parsed.data.referralCode) {
-            const referrer = await User.findOne({
-                referralCode: parsed.data.referralCode.toUpperCase(),
-            }).select("_id email");
-
-            if (referrer) {
-                if (referrer.email.toLowerCase() === parsed.data.email.toLowerCase()) {
-                    return NextResponse.json(
-                        { success: false, message: "You cannot use your own referral code." },
-                        { status: 400 }
-                    );
-                }
-                referrerId = referrer._id.toString();
-            }
-            // Unknown / mistyped codes are silently ignored —
-            // we don't block registration over a bad referral code.
+        // ── Duplicate phone check (against real Users) ────────────────────
+        const existingPhone = await User.findOne({ phone: parsed.data.phone });
+        if (existingPhone) {
+            return NextResponse.json(
+                { success: false, message: "Phone number already exists" },
+                { status: 409 }
+            );
         }
 
-        // ── Create user ───────────────────────────────────────────────────
+        // ── Self-referral guard (fail fast, before spending an OTP) ──────
+        if (parsed.data.referralCode) {
+            const { selfReferralAttempted } = await resolveReferrer(parsed.data.referralCode, email);
+            if (selfReferralAttempted) {
+                return NextResponse.json(
+                    { success: false, message: "You cannot use your own referral code." },
+                    { status: 400 }
+                );
+            }
+        }
+
+        // ── Hash password now — never store plaintext, even temporarily ──
         const hashedPassword = await hashPassword(parsed.data.password);
-        const myReferralCode = await uniqueReferralCode(parsed.data.name);
 
-        const user = await User.create({
-            name:                  parsed.data.name,
-            ...(parsed.data.dob ? { dob: parsed.data.dob } : {}),
-            email:                 parsed.data.email.toLowerCase(),
-            phone:                 parsed.data.phone,
-            password:              hashedPassword,
-            address:               parsed.data.address,
-            referralCode:          myReferralCode,
-            referredBy:            referrerId,
-            loyaltyPoints:         0,
-            referralRewardGranted: false,
-            deliveredOrderCount:   0,
-            // firstDeliveryFreeUsed is NOT explicitly set here — the schema
-            // default of `false` is correct.  Eligibility is determined at
-            // order time by the two-condition check in firstFreeDelivery.ts.
-        });
-
-        // ── Sign JWT ──────────────────────────────────────────────────────
-        const token = signToken({
-            userId: user._id.toString(),
-            email:  user.email,
-            role:   user.role,
-        });
-
-        const response = NextResponse.json(
-            {
-                success: true,
-                message: "User registered successfully",
-                user: {
-                    id:           user._id,
-                    name:         user.name,
-                    email:        user.email,
-                    role:         user.role,
-                    referralCode: user.referralCode,
-                },
-            },
-            { status: 201 }
+        // ── Look up any existing pending signup for this email ───────────
+        const existingPending = await PendingSignup.findOne({ email }).select(
+            "lastRequestedAt requestCount requestWindowStart"
         );
 
-        response.cookies.set("token", token, {
-            httpOnly: true,
-            secure:   process.env.NODE_ENV === "production",
-            sameSite: "lax",
-            path:     "/",
-            maxAge:   60 * 60 * 24 * 7,
+        if (existingPending?.lastRequestedAt) {
+            const elapsedMs = Date.now() - existingPending.lastRequestedAt.getTime();
+            if (elapsedMs < OTP_RESEND_COOLDOWN_SECONDS * 1000) {
+                const secondsLeft = Math.ceil((OTP_RESEND_COOLDOWN_SECONDS * 1000 - elapsedMs) / 1000);
+                return NextResponse.json(
+                    {
+                        success: false,
+                        message: `Please wait ${secondsLeft}s before requesting another code.`,
+                    },
+                    { status: 429 }
+                );
+            }
+        }
+
+        const resetWindow = shouldResetRequestWindow(existingPending?.requestWindowStart ?? null);
+        const currentCount = resetWindow ? 0 : (existingPending?.requestCount ?? 0);
+
+        if (!resetWindow && currentCount >= OTP_MAX_REQUESTS_PER_HOUR) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    message: "Too many verification code requests. Please try again in an hour.",
+                },
+                { status: 429 }
+            );
+        }
+
+        // ── Generate + hash OTP ───────────────────────────────────────────
+        const otp = generateOtp();
+        const otpHash = await hashOtp(otp);
+        const now = new Date();
+        const otpExpiresAt = new Date(now.getTime() + OTP_EXPIRY_MINUTES * 60 * 1000);
+
+        // ── Upsert the pending signup (replaces any prior attempt for this
+        // email — e.g. the user corrected a field and resubmitted) ───────
+        await PendingSignup.findOneAndUpdate(
+            { email },
+            {
+                $set: {
+                    name:               parsed.data.name,
+                    dob:                parsed.data.dob || undefined,
+                    phone:              parsed.data.phone,
+                    password:           hashedPassword,
+                    referralCodeInput:  parsed.data.referralCode || "",
+                    address:            parsed.data.address,
+                    otpHash,
+                    otpExpiresAt,
+                    otpAttempts:        0,
+                    lockedUntil:        null,
+                    requestCount:       currentCount + 1,
+                    requestWindowStart: resetWindow ? now : (existingPending?.requestWindowStart ?? now),
+                    lastRequestedAt:    now,
+                },
+            },
+            { upsert: true, setDefaultsOnInsert: true }
+        );
+
+        // ── Send the verification email ────────────────────────────────────
+        try {
+            await sendSignupOtpEmail({ to: email, name: parsed.data.name, otp });
+        } catch (emailError) {
+            console.error("SIGNUP_OTP_EMAIL_ERROR", emailError);
+            return NextResponse.json(
+                { success: false, message: "Couldn't send the verification email. Please try again." },
+                { status: 500 }
+            );
+        }
+
+        // ── Also send the OTP via WhatsApp (signup flow only) ───────────────
+        // Fire-and-forget, exactly like verify-signup-otp's welcome email —
+        // WhatsApp delivery is additive on top of the required, already-
+        // working email OTP above; a WhatsApp failure (missing template
+        // approval, API outage, unrecognizable phone format, etc.) must
+        // never block signup, since the user can always verify via the
+        // email code regardless.
+        //
+        // Uses the engine's DIRECT send() path, not emit() — auth.otp_requested
+        // is a transactional event, and the engine's own emit() → handleEvent()
+        // safety rail drops any transactional event with no target.userId
+        // (see notifications/engine.ts). No User document exists yet at this
+        // point in the signup flow (see this file's own header comment) — so
+        // emit() would silently drop the event before it ever reached a
+        // provider. send() is the engine's other, equally-documented public
+        // entry point, built exactly for "caller already has a fully-built
+        // payload" — still the same Notification Engine, just its other door.
+        //
+        // The phone/name fields below are read directly by
+        // WhatsAppDeliveryProvider for this one case (no User to resolve via
+        // target.userId yet) — see that provider's own send() for the
+        // matching, narrowly-scoped branch. Reuses buildOtpRequestedPayload
+        // (now exported from transactionalTemplates.ts) rather than
+        // constructing a second, duplicate payload shape by hand.
+        const whatsappPayload = buildOtpRequestedPayload({
+            name: "auth.otp_requested",
+            data: { otp, flow: "signup", phone: parsed.data.phone, name: parsed.data.name },
+        });
+        notificationEngine.send(["whatsapp"], {}, whatsappPayload).catch((whatsappError) => {
+            console.error("SIGNUP_OTP_WHATSAPP_ERROR", whatsappError);
         });
 
-        return response;
+        return NextResponse.json(
+            {
+                success: true,
+                message: "Verification code sent to your email.",
+                email,
+            },
+            { status: 200 }
+        );
     } catch (error: unknown) {
         console.error("REGISTER_ERROR", error);
         const msg = error instanceof Error ? error.message : "Something went wrong";

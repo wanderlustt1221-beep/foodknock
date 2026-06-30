@@ -7,13 +7,14 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
     LayoutDashboard, Package, ShoppingBag, Users,
-    Star, Tag, LogOut, X, ChevronRight, Zap,
+    Star, Tag, LogOut, X, ChevronRight, Zap, Bell,
 } from "lucide-react";
 import { useState } from "react";
 
 const navItems = [
     { href: "/admin",          label: "Dashboard", icon: LayoutDashboard, exact: true },
     { href: "/",               label: "Home",       icon: Zap,             exact: true },
+    { href: "/admin/notifications", label: "Notifications", icon: Bell                 },
     { href: "/admin/products", label: "Products",   icon: Package                     },
     { href: "/admin/orders",   label: "Orders",     icon: ShoppingBag                 },
     { href: "/admin/users",    label: "Users",      icon: Users                       },

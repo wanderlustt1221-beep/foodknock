@@ -5,7 +5,9 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Toaster } from "react-hot-toast";
 import { Suspense } from "react";
+import { cookies } from "next/headers";
 import NotificationPrompt from "@/components/shared/NotificationPrompt";
+import { verifyToken } from "@/lib/auth";
 import { Analytics } from "@vercel/analytics/next";
 
 const BASE_URL = "https://www.foodknock.com";
@@ -147,9 +149,30 @@ export const metadata: Metadata = {
 };
 
 // ─── Root layout ───────────────────────────────────────────────────────────
-export default function RootLayout({
+//
+// Feature 3 Part 4: "Guests should NEVER see the notification permission
+// prompt — only logged-in users." The session cookie is httpOnly (set in
+// verify-signup-otp's response.cookies.set(..., {httpOnly: true})), so it
+// cannot be read from client-side JS — this server-side check is the only
+// place that requirement can actually be enforced, hence checking it here
+// rather than inside NotificationPrompt itself (a client component).
+async function isAuthenticated(): Promise<boolean> {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("token")?.value;
+    if (!token) return false;
+    try {
+        verifyToken(token);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export default async function RootLayout({
     children,
 }: Readonly<{ children: React.ReactNode }>) {
+    const authed = await isAuthenticated();
+
     return (
         <html lang="en">
             <body className="bg-[#FFFBF5] text-stone-800 antialiased">
@@ -169,7 +192,7 @@ export default function RootLayout({
                 </div>
 
                 <Suspense fallback={null}>
-                    <NotificationPrompt />
+                    <NotificationPrompt isAuthenticated={authed} />
                 </Suspense>
 
                 <Analytics />

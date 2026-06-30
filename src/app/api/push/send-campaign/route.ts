@@ -1,4 +1,5 @@
 export const dynamic = "force-dynamic";
+// src/app/api/push/send-campaign/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
 import { broadcastCampaign, type NotificationSlot } from "@/lib/webpush";

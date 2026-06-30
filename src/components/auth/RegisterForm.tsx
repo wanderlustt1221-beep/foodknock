@@ -7,6 +7,17 @@
 // - Server-side self-referral error mapped
 // - Password strength meter
 // - No phone numbers in toasts
+// - Step 1 of the OTP-gated signup flow: submits registration data, sends
+//   the verification OTP, and hands off to the OTP screen — no account is
+//   created here.
+//
+// FIX: the server returns 409 for BOTH duplicate-email and duplicate-phone
+// (see register/route.ts). The error-mapping below previously checked
+// `status === 409` first with OR, which matched on the email branch for
+// ANY 409 — including duplicate-phone responses — so a duplicate phone
+// number incorrectly showed "email already exists". Message content
+// (specifically "phone") is now checked first, before falling back to the
+// 409-or-"email" branch.
 
 import { useState } from "react";
 import { toast } from "react-hot-toast";
@@ -18,18 +29,18 @@ import {
 
 // ── Types ────────────────────────────────────────────────────────────────
 type FormState = {
-    name:         string;
-    dob:          string;
-    email:        string;
-    phone:        string;
-    password:     string;
+    name: string;
+    dob: string;
+    email: string;
+    phone: string;
+    password: string;
     referralCode: string;
     addressLine1: string;
     addressLine2: string;
-    city:         string;
-    state:        string;
-    pincode:      string;
-    landmark:     string;
+    city: string;
+    state: string;
+    pincode: string;
+    landmark: string;
 };
 
 type FieldErrors = Partial<Record<keyof FormState, string>>;
@@ -51,20 +62,20 @@ const FIELD_LABELS: Partial<Record<keyof FormState, string>> = {
 
 // ── Field component ──────────────────────────────────────────────────────
 type FieldProps = {
-    id:            string;
-    label:         string;
-    type?:         string;
-    value:         string;
-    onChange:      (v: string) => void;
-    placeholder:   string;
+    id: string;
+    label: string;
+    type?: string;
+    value: string;
+    onChange: (v: string) => void;
+    placeholder: string;
     autoComplete?: string;
-    icon:          React.ReactNode;
-    rightEl?:      React.ReactNode;
-    required?:     boolean;
-    colSpan?:      boolean;
-    optional?:     boolean;
-    error?:        string;
-    hint?:         string;
+    icon: React.ReactNode;
+    rightEl?: React.ReactNode;
+    required?: boolean;
+    colSpan?: boolean;
+    optional?: boolean;
+    error?: string;
+    hint?: string;
 };
 
 function Field({
@@ -99,11 +110,10 @@ function Field({
                     required={required}
                     aria-invalid={!!error}
                     aria-describedby={error ? `${id}-error` : hint ? `${id}-hint` : undefined}
-                    className={`w-full rounded-xl border ${
-                        error
+                    className={`w-full rounded-xl border ${error
                             ? "border-red-300 bg-red-50/50 focus:border-red-400 focus:ring-red-100"
                             : "border-amber-200 bg-amber-50/50 focus:border-orange-400 focus:ring-orange-100"
-                    } py-2.5 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all duration-200 hover:border-amber-300 focus:bg-white focus:outline-none focus:ring-2`}
+                        } py-2.5 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all duration-200 hover:border-amber-300 focus:bg-white focus:outline-none focus:ring-2`}
                 />
                 {rightEl && <span className="absolute right-3.5">{rightEl}</span>}
             </div>
@@ -130,10 +140,10 @@ function SectionHead({ emoji, title }: { emoji: string; title: string }) {
 }
 
 // ── Main component ───────────────────────────────────────────────────────
-export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
-    const [form,        setForm]        = useState<FormState>(INITIAL);
-    const [showPass,    setShowPass]    = useState(false);
-    const [loading,     setLoading]     = useState(false);
+export default function RegisterForm({ onOtpSent }: { onOtpSent: (email: string) => void }) {
+    const [form, setForm] = useState<FormState>(INITIAL);
+    const [showPass, setShowPass] = useState(false);
+    const [loading, setLoading] = useState(false);
     const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
 
     const set = (key: keyof FormState) => (v: string) => {
@@ -141,7 +151,7 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
         if (fieldErrors[key]) setFieldErrors((e) => { const n = { ...e }; delete n[key]; return n; });
     };
 
-    const strength      = form.password.length === 0 ? 0 : form.password.length < 6 ? 1 : form.password.length < 10 ? 2 : 3;
+    const strength = form.password.length === 0 ? 0 : form.password.length < 6 ? 1 : form.password.length < 10 ? 2 : 3;
     const strengthLabel = ["", "Weak", "Good", "Strong"][strength];
     const strengthColor = ["", "bg-red-400", "bg-amber-400", "bg-green-500"][strength];
 
@@ -188,11 +198,12 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
         setLoading(true);
 
         try {
-            // 1) Register
+            // Step 1: send registration data + request the email OTP.
+            // No account is created here — see verify-signup-otp for that.
             const registerRes = await fetch("/api/auth/register", {
-                method:  "POST",
+                method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({
+                body: JSON.stringify({
                     ...form,
                     referralCode: form.referralCode.trim().toUpperCase() || undefined,
                 }),
@@ -202,14 +213,19 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
             if (!registerRes.ok) {
                 const msg: string = registerData.message ?? "";
 
-                if (registerRes.status === 409 || msg.toLowerCase().includes("email")) {
-                    setFieldErrors({ email: "An account with this email already exists." });
-                    toast.error("This email is already registered. Try signing in instead.", {
-                        style: { border: "1.5px solid #fca5a5", borderRadius: "14px", fontWeight: "700", fontSize: "13px" },
-                    });
-                } else if (msg.toLowerCase().includes("phone")) {
+                // ── Check "phone" FIRST ──────────────────────────────────────
+                // Both duplicate-email and duplicate-phone return 409 from the
+                // server, so branching on status code alone is ambiguous.
+                // Message content must be checked before falling back to the
+                // status-code shortcut.
+                if (msg.toLowerCase().includes("phone")) {
                     setFieldErrors({ phone: "This phone number is already registered." });
                     toast.error("This phone number is already in use.", {
+                        style: { border: "1.5px solid #fca5a5", borderRadius: "14px", fontWeight: "700", fontSize: "13px" },
+                    });
+                } else if (registerRes.status === 409 || msg.toLowerCase().includes("email")) {
+                    setFieldErrors({ email: "An account with this email already exists." });
+                    toast.error("This email is already registered. Try signing in instead.", {
                         style: { border: "1.5px solid #fca5a5", borderRadius: "14px", fontWeight: "700", fontSize: "13px" },
                     });
                 } else if (msg.toLowerCase().includes("own referral") || msg.toLowerCase().includes("self")) {
@@ -225,61 +241,20 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
                 return;
             }
 
-            // 2) Auto-login
-            const loginRes  = await fetch("/api/auth/login", {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ email: form.email.trim(), password: form.password }),
+            toast.success("Verification code sent! Check your inbox. 📩", {
+                duration: 2400,
+                style: {
+                    background: "#fff", color: "#1c1917",
+                    border: "1.5px solid #fed7aa", borderRadius: "16px",
+                    fontWeight: "700", fontSize: "13px",
+                    boxShadow: "0 8px 24px rgba(249,115,22,0.15)",
+                },
+                iconTheme: { primary: "#f97316", secondary: "#fff" },
             });
-            const loginData = await loginRes.json();
 
-            if (!loginRes.ok) {
-                toast.success("Account created! Please sign in to continue. 🎉", {
-                    duration: 2600,
-                    style: {
-                        background: "#fff", color: "#1c1917",
-                        border: "1.5px solid #fed7aa", borderRadius: "16px",
-                        fontWeight: "700", fontSize: "13px",
-                        boxShadow: "0 8px 32px rgba(249,115,22,0.18)",
-                    },
-                    iconTheme: { primary: "#f97316", secondary: "#fff" },
-                });
-                setForm(INITIAL);
-                onSuccess();
-                return;
-            }
-
-            // 3) Cache user info
-            try {
-                if (loginData?.user) {
-                    localStorage.setItem("cafeapp_user", JSON.stringify({
-                        name:    loginData.user.name    ?? form.name.trim(),
-                        email:   loginData.user.email   ?? form.email.trim(),
-                        phone:   loginData.user.phone   ?? form.phone.trim(),
-                        address: loginData.user.address ?? form.addressLine1.trim(),
-                    }));
-                }
-            } catch { /* storage unavailable */ }
-
-            const hadReferral = !!form.referralCode.trim();
-            toast.success(
-                hadReferral
-                    ? "🎉 Welcome to FoodKnock! Referral applied — bonus points arrive after your first delivery."
-                    : "🎉 Welcome to FoodKnock! Your account is ready.",
-                {
-                    duration: 2600,
-                    style: {
-                        background: "#fff", color: "#1c1917",
-                        border: "1.5px solid #fed7aa", borderRadius: "16px",
-                        fontWeight: "700", fontSize: "13px",
-                        boxShadow: "0 8px 32px rgba(249,115,22,0.18)",
-                    },
-                    iconTheme: { primary: "#f97316", secondary: "#fff" },
-                }
-            );
-
+            const verifiedEmail = registerData.email ?? form.email.trim().toLowerCase();
             setForm(INITIAL);
-            setTimeout(() => { window.location.href = "/"; }, 150);
+            onOtpSent(verifiedEmail);
         } catch {
             toast.error("Something went wrong. Please check your connection and try again.");
         } finally {
@@ -343,11 +318,10 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
                             placeholder="Create a strong password"
                             autoComplete="new-password"
                             aria-invalid={!!fieldErrors.password}
-                            className={`w-full rounded-xl border ${
-                                fieldErrors.password
+                            className={`w-full rounded-xl border ${fieldErrors.password
                                     ? "border-red-300 bg-red-50/50 focus:border-red-400 focus:ring-red-100"
                                     : "border-amber-200 bg-amber-50/50 focus:border-orange-400 focus:ring-orange-100"
-                            } py-2.5 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all focus:bg-white focus:outline-none focus:ring-2`}
+                                } py-2.5 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all focus:bg-white focus:outline-none focus:ring-2`}
                         />
                         <button
                             type="button"
@@ -453,7 +427,7 @@ export default function RegisterForm({ onSuccess }: { onSuccess: () => void }) {
                 className="group mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 py-3.5 text-sm font-black text-white shadow-lg shadow-orange-200/70 transition-all duration-300 hover:brightness-110 hover:shadow-orange-300 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
             >
                 {loading
-                    ? <><Loader2 size={16} className="animate-spin" /> Creating your account...</>
+                    ? <><Loader2 size={16} className="animate-spin" /> Sending verification code...</>
                     : <>Create My Account 🎉 <ArrowRight size={15} className="transition-transform duration-300 group-hover:translate-x-1" /></>
                 }
             </button>

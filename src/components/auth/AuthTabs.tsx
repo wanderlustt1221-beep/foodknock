@@ -7,20 +7,43 @@
 import { useState } from "react";
 import LoginForm from "./LoginForm";
 import RegisterForm from "./RegisterForm";
+import ForgotPasswordForm from "./ForgotPasswordForm";
+import VerifyOtpForm from "./VerifyOtpForm";
+import ResetPasswordForm from "./ResetPasswordForm";
+import ResetSuccessScreen from "./ResetSuccessScreen";
+import VerifySignupOtpForm from "./VerifySignupOtpForm";
 import { Star, Flame, Zap, Gift, Shield } from "lucide-react";
 
 type Tab = "login" | "register";
+type View = Tab | "forgot-password" | "verify-otp" | "reset-password" | "reset-success" | "verify-signup-otp";
 type AuthTabsProps = { redirectTo?: string };
 
 const PERKS = [
-    { icon: "⚡", text: "Faster checkout every time"      },
-    { icon: "🎁", text: "Exclusive member-only deals"     },
-    { icon: "📦", text: "Order history & 1-tap reorder"   },
-    { icon: "🎂", text: "Birthday surprise gift from us"  },
+    { icon: "⚡", text: "Faster checkout every time" },
+    { icon: "🎁", text: "Exclusive member-only deals" },
+    { icon: "📦", text: "Order history & 1-tap reorder" },
+    { icon: "🎂", text: "Birthday surprise gift from us" },
 ];
 
 export default function AuthTabs({ redirectTo = "/" }: AuthTabsProps) {
-    const [activeTab, setActiveTab] = useState<Tab>("login");
+    const [view, setView] = useState<View>("login");
+    const [resetEmail, setResetEmail] = useState("");
+    const [resetToken, setResetToken] = useState("");
+    const [signupEmail, setSignupEmail] = useState("");
+
+    // The pill tab-switcher only applies to login/register — treat any
+    // other view as "login" for the purpose of which pill is highlighted,
+    // though the switcher itself is hidden entirely during the
+    // forgot-password and signup-verification sub-flows (see isTabView below).
+    const activeTab: Tab = view === "register" ? "register" : "login";
+    const isTabView = view === "login" || view === "register";
+
+    const goToLogin = () => {
+        setView("login");
+        setResetEmail("");
+        setResetToken("");
+        setSignupEmail("");
+    };
 
     return (
         <div className="w-full max-w-[440px]">
@@ -76,100 +99,143 @@ export default function AuthTabs({ redirectTo = "/" }: AuthTabsProps) {
 
                         {/* Dynamic headline */}
                         <h2 className="text-[1.45rem] font-black leading-tight tracking-tight text-white drop-shadow-sm">
-                            {activeTab === "login"
-                                ? "Welcome back, foodie! 👋"
-                                : "Join the food family! 🍕"}
+                            {view === "login" && "Welcome back, foodie! 👋"}
+                            {view === "register" && "Join the food family! 🍕"}
+                            {view === "forgot-password" && "Let's get you back in 🔑"}
+                            {view === "verify-otp" && "Almost there! 📩"}
+                            {view === "reset-password" && "Choose a new password 🔐"}
+                            {view === "reset-success" && "You're all set! 🎉"}
+                            {view === "verify-signup-otp" && "One last step! 📩"}
                         </h2>
                         <p className="mt-1 text-[12.5px] font-medium text-white/80">
-                            {activeTab === "login"
-                                ? "Your cart, deals & saved address are waiting."
-                                : "Free to join. Deals & perks from day one."}
+                            {view === "login" && "Your cart, deals & saved address are waiting."}
+                            {view === "register" && "Free to join. Deals & perks from day one."}
+                            {view === "forgot-password" && "We'll send a code to verify it's you."}
+                            {view === "verify-otp" && "Enter the code we just sent you."}
+                            {view === "reset-password" && "Make it strong and memorable."}
+                            {view === "reset-success" && "Your account is secure and ready to go."}
+                            {view === "verify-signup-otp" && "Confirm your email to activate your account."}
                         </p>
                     </div>
                 </div>
 
-                {/* ── Tab switcher ── */}
-                <div className="relative flex gap-1 border-b border-amber-100 bg-amber-50/70 p-1.5">
-                    {/* Sliding pill */}
-                    <div
-                        className="absolute bottom-1.5 top-1.5 rounded-xl border border-amber-200/70 bg-white shadow-md transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
-                        style={{
-                            width: "calc(50% - 8px)",
-                            left: activeTab === "login" ? "6px" : "calc(50% + 2px)",
-                        }}
-                        aria-hidden="true"
-                    />
-                    {(["login", "register"] as Tab[]).map((tab) => (
-                        <button
-                            key={tab}
-                            type="button"
-                            onClick={() => setActiveTab(tab)}
-                            aria-selected={activeTab === tab}
-                            role="tab"
-                            className={`relative z-10 flex-1 rounded-xl py-2.5 text-[13px] font-black transition-colors duration-200 ${
-                                activeTab === tab ? "text-orange-600" : "text-stone-400 hover:text-stone-600"
-                            }`}
-                        >
-                            {tab === "login" ? "Sign In" : "Create Account"}
-                        </button>
-                    ))}
-                </div>
+                {/* ── Tab switcher (hidden during sub-flows) ── */}
+                {isTabView && (
+                    <div className="relative flex gap-1 border-b border-amber-100 bg-amber-50/70 p-1.5">
+                        {/* Sliding pill */}
+                        <div
+                            className="absolute bottom-1.5 top-1.5 rounded-xl border border-amber-200/70 bg-white shadow-md transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
+                            style={{
+                                width: "calc(50% - 8px)",
+                                left: activeTab === "login" ? "6px" : "calc(50% + 2px)",
+                            }}
+                            aria-hidden="true"
+                        />
+                        {(["login", "register"] as Tab[]).map((tab) => (
+                            <button
+                                key={tab}
+                                type="button"
+                                onClick={() => setView(tab)}
+                                aria-selected={activeTab === tab}
+                                role="tab"
+                                className={`relative z-10 flex-1 rounded-xl py-2.5 text-[13px] font-black transition-colors duration-200 ${activeTab === tab ? "text-orange-600" : "text-stone-400 hover:text-stone-600"
+                                    }`}
+                            >
+                                {tab === "login" ? "Sign In" : "Create Account"}
+                            </button>
+                        ))}
+                    </div>
+                )}
 
-                {/* ── Context-aware social proof ── */}
-                <div className="px-6 pt-5">
-                    {activeTab === "login" ? (
-                        <div className="flex items-center gap-3 rounded-2xl border border-amber-100 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-3">
-                            <div className="flex gap-0.5 shrink-0">
-                                {[1,2,3,4,5].map((i) => (
-                                    <Star key={i} size={13} className="fill-amber-400 text-amber-400" />
-                                ))}
+                {/* ── Context-aware social proof (login/register only) ── */}
+                {isTabView && (
+                    <div className="px-6 pt-5">
+                        {activeTab === "login" ? (
+                            <div className="flex items-center gap-3 rounded-2xl border border-amber-100 bg-gradient-to-r from-amber-50 to-orange-50 px-4 py-3">
+                                <div className="flex gap-0.5 shrink-0">
+                                    {[1, 2, 3, 4, 5].map((i) => (
+                                        <Star key={i} size={13} className="fill-amber-400 text-amber-400" />
+                                    ))}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-[11px] font-black text-stone-800">
+                                        Rated <span className="text-orange-600">4.9/5</span> by 2,450+ real customers
+                                    </p>
+                                    <p className="text-[10px] text-stone-400">Sikar & Danta's most loved food spot</p>
+                                </div>
+                                <div className="flex -space-x-1.5 shrink-0">
+                                    {["from-amber-400 to-orange-500", "from-orange-400 to-red-500", "from-yellow-400 to-amber-500"].map((g, i) => (
+                                        <div
+                                            key={i}
+                                            className={`flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-gradient-to-br ${g} text-[9px] font-black text-white shadow`}
+                                        >
+                                            {["P", "R", "A"][i]}
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
-                            <div className="min-w-0 flex-1">
-                                <p className="text-[11px] font-black text-stone-800">
-                                    Rated <span className="text-orange-600">4.9/5</span> by 2,450+ real customers
-                                </p>
-                                <p className="text-[10px] text-stone-400">Sikar & Danta's most loved food spot</p>
-                            </div>
-                            <div className="flex -space-x-1.5 shrink-0">
-                                {["from-amber-400 to-orange-500", "from-orange-400 to-red-500", "from-yellow-400 to-amber-500"].map((g, i) => (
+                        ) : (
+                            <div className="grid grid-cols-2 gap-2">
+                                {PERKS.map((p) => (
                                     <div
-                                        key={i}
-                                        className={`flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-gradient-to-br ${g} text-[9px] font-black text-white shadow`}
+                                        key={p.text}
+                                        className="flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50/80 px-3 py-2.5 transition-all hover:border-amber-200 hover:bg-amber-50"
                                     >
-                                        {["P","R","A"][i]}
+                                        <span className="shrink-0 text-base">{p.icon}</span>
+                                        <span className="text-[10.5px] font-bold leading-tight text-stone-600">{p.text}</span>
                                     </div>
                                 ))}
                             </div>
-                        </div>
-                    ) : (
-                        <div className="grid grid-cols-2 gap-2">
-                            {PERKS.map((p) => (
-                                <div
-                                    key={p.text}
-                                    className="flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50/80 px-3 py-2.5 transition-all hover:border-amber-200 hover:bg-amber-50"
-                                >
-                                    <span className="shrink-0 text-base">{p.icon}</span>
-                                    <span className="text-[10.5px] font-bold leading-tight text-stone-600">{p.text}</span>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                        )}
+                    </div>
+                )}
 
-                {/* ── Form ── */}
+                {/* ── Form / sub-flow content ── */}
                 <div className="px-6 pb-6 pt-5">
-                    {activeTab === "login" ? (
-                        <LoginForm redirectTo={redirectTo} />
-                    ) : (
-                        <RegisterForm onSuccess={() => setActiveTab("login")} />
+                    {view === "login" && (
+                        <LoginForm
+                            redirectTo={redirectTo}
+                            onForgotPassword={() => setView("forgot-password")}
+                        />
+                    )}
+                    {view === "register" && (
+                        <RegisterForm onOtpSent={(email) => { setSignupEmail(email); setView("verify-signup-otp"); }} />
+                    )}
+                    {view === "verify-signup-otp" && (
+                        <VerifySignupOtpForm
+                            email={signupEmail}
+                            onBackToStart={goToLogin}
+                        />
+                    )}
+                    {view === "forgot-password" && (
+                        <ForgotPasswordForm
+                            onCodeSent={(email) => { setResetEmail(email); setView("verify-otp"); }}
+                            onBackToLogin={goToLogin}
+                        />
+                    )}
+                    {view === "verify-otp" && (
+                        <VerifyOtpForm
+                            email={resetEmail}
+                            onVerified={(token) => { setResetToken(token); setView("reset-password"); }}
+                            onBackToLogin={goToLogin}
+                        />
+                    )}
+                    {view === "reset-password" && (
+                        <ResetPasswordForm
+                            resetToken={resetToken}
+                            onSuccess={() => setView("reset-success")}
+                        />
+                    )}
+                    {view === "reset-success" && (
+                        <ResetSuccessScreen onDone={goToLogin} />
                     )}
                 </div>
 
                 {/* ── Trust footer ── */}
                 <div className="flex items-center justify-center gap-6 border-t border-amber-100 bg-gradient-to-r from-amber-50/60 to-orange-50/40 px-6 py-3.5">
                     {[
-                        { icon: Flame,  text: "Fresh Daily"   },
-                        { icon: Zap,    text: "Fast Delivery" },
+                        { icon: Flame, text: "Fresh Daily" },
+                        { icon: Zap, text: "Fast Delivery" },
                         { icon: Shield, text: "Safe & Secure" },
                     ].map(({ icon: Icon, text }) => (
                         <div key={text} className="flex items-center gap-1.5 text-[10.5px] font-bold text-stone-400">

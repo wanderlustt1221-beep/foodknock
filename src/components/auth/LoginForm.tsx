@@ -5,28 +5,30 @@
 // - Inline field-level error states
 // - Friendly error messages
 // - No phone numbers
+// - Shows remaining attempts and lock/block countdowns from the new
+//   login brute-force protection, reusing the existing visual style.
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { toast } from "react-hot-toast";
 import { Mail, Lock, Eye, EyeOff, ArrowRight, Loader2, XCircle } from "lucide-react";
 
-type LoginFormProps = { redirectTo?: string };
+type LoginFormProps = { redirectTo?: string; onForgotPassword?: () => void };
 type FieldErrors = { email?: string; password?: string };
 
 // ── Field component ──────────────────────────────────────────────────────
 type FieldProps = {
-    id:            string;
-    label:         string;
-    type:          string;
-    value:         string;
-    onChange:      (v: string) => void;
-    placeholder:   string;
+    id: string;
+    label: string;
+    type: string;
+    value: string;
+    onChange: (v: string) => void;
+    placeholder: string;
     autoComplete?: string;
-    icon:          React.ReactNode;
-    rightEl?:      React.ReactNode;
-    required?:     boolean;
-    error?:        string;
+    icon: React.ReactNode;
+    rightEl?: React.ReactNode;
+    required?: boolean;
+    error?: string;
 };
 
 function Field({
@@ -53,11 +55,10 @@ function Field({
                     required={required}
                     aria-invalid={!!error}
                     aria-describedby={error ? `${id}-error` : undefined}
-                    className={`w-full rounded-xl border ${
-                        error
+                    className={`w-full rounded-xl border ${error
                             ? "border-red-300 bg-red-50/50 focus:border-red-400 focus:ring-red-100"
                             : "border-amber-200 bg-amber-50/50 focus:border-orange-400 focus:ring-orange-100"
-                    } py-3 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all duration-200 hover:border-amber-300 focus:bg-white focus:outline-none focus:ring-2`}
+                        } py-3 pl-10 pr-10 text-sm font-medium text-stone-800 placeholder:text-stone-400 transition-all duration-200 hover:border-amber-300 focus:bg-white focus:outline-none focus:ring-2`}
                 />
                 {rightEl && <span className="absolute right-3.5">{rightEl}</span>}
             </div>
@@ -72,7 +73,7 @@ function Field({
 }
 
 // ── LoginForm ────────────────────────────────────────────────────────────
-export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
+export default function LoginForm({ redirectTo = "/", onForgotPassword }: LoginFormProps) {
     const searchParams = useSearchParams();
 
     const [email,       setEmail]       = useState("");
@@ -80,6 +81,23 @@ export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
     const [showPass,    setShowPass]    = useState(false);
     const [loading,     setLoading]     = useState(false);
     const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+    const [lockedUntilMs, setLockedUntilMs] = useState<number | null>(null);
+    const [lockSecondsLeft, setLockSecondsLeft] = useState(0);
+
+    useEffect(() => {
+        if (!lockedUntilMs) {
+            setLockSecondsLeft(0);
+            return;
+        }
+        const tick = () => {
+            const secondsLeft = Math.max(0, Math.ceil((lockedUntilMs - Date.now()) / 1000));
+            setLockSecondsLeft(secondsLeft);
+            if (secondsLeft <= 0) setLockedUntilMs(null);
+        };
+        tick();
+        const timer = setInterval(tick, 1000);
+        return () => clearInterval(timer);
+    }, [lockedUntilMs]);
 
     const clearError = (key: keyof FieldErrors) =>
         setFieldErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
@@ -105,18 +123,39 @@ export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
         setLoading(true);
 
         try {
-            const res  = await fetch("/api/auth/login", {
-                method:  "POST",
+            const res = await fetch("/api/auth/login", {
+                method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ email: email.trim(), password }),
+                body: JSON.stringify({ email: email.trim(), password }),
             });
             const data = await res.json();
 
             if (!res.ok) {
                 if (res.status === 401) {
+                    const attemptsRemaining: number | undefined = data.attemptsRemaining;
+                    const passwordMessage =
+                        typeof attemptsRemaining === "number"
+                            ? `Incorrect email or password. ${attemptsRemaining} attempt(s) remaining.`
+                            : data.message || "Incorrect email or password. Please try again.";
+
                     setFieldErrors({
                         email:    " ",
-                        password: data.message || "Incorrect email or password. Please try again.",
+                        password: passwordMessage,
+                    });
+                } else if (res.status === 429) {
+                    // Email-locked or IP-blocked — never compare/leak password
+                    // state here; show the server's lock/block message inline
+                    // on the password field, exactly like the 401 case.
+                    setFieldErrors({
+                        email:    " ",
+                        password: data.message || "Too many attempts. Please try again later.",
+                    });
+                    if (typeof data.lockedMinutesRemaining === "number") {
+                        setLockedUntilMs(Date.now() + data.lockedMinutesRemaining * 60 * 1000);
+                    }
+                    toast.error(data.message || "Too many attempts. Please try again later.", {
+                        duration: 6000,
+                        style: { border: "1.5px solid #fca5a5", borderRadius: "14px", fontWeight: "700", fontSize: "13px" },
                     });
                 } else if (res.status === 403) {
                     toast.error(data.message || "Your account has been suspended. Contact support.", {
@@ -132,9 +171,9 @@ export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
             try {
                 if (data?.user) {
                     localStorage.setItem("cafeapp_user", JSON.stringify({
-                        name:    data.user.name    ?? "",
-                        email:   data.user.email   ?? "",
-                        phone:   data.user.phone   ?? "",
+                        name: data.user.name ?? "",
+                        email: data.user.email ?? "",
+                        phone: data.user.phone ?? "",
                         address: data.user.address ?? "",
                     }));
                 }
@@ -151,8 +190,8 @@ export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
                 iconTheme: { primary: "#f97316", secondary: "#fff" },
             });
 
-            const role    = data.user?.role ?? "user";
-            const qParam  = searchParams.get("redirect");
+            const role = data.user?.role ?? "user";
+            const qParam = searchParams.get("redirect");
             const intended = qParam || redirectTo;
 
             let dest = "/";
@@ -210,13 +249,25 @@ export default function LoginForm({ redirectTo = "/" }: LoginFormProps) {
                 error={fieldErrors.password}
             />
 
+            {onForgotPassword && (
+                <button
+                    type="button"
+                    onClick={onForgotPassword}
+                    className="-mt-1 self-end text-[12px] font-bold text-orange-600 transition-colors hover:text-orange-700"
+                >
+                    Forgot password?
+                </button>
+            )}
+
             <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || lockSecondsLeft > 0}
                 className="group mt-1 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 py-3.5 text-sm font-black text-white shadow-lg shadow-orange-200/70 transition-all duration-300 hover:brightness-110 hover:shadow-orange-300 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
             >
                 {loading ? (
                     <><Loader2 size={16} className="animate-spin" /> Signing you in...</>
+                ) : lockSecondsLeft > 0 ? (
+                    <>Try again in {Math.floor(lockSecondsLeft / 60)}m {lockSecondsLeft % 60}s</>
                 ) : (
                     <>Sign In to Your Account <ArrowRight size={15} className="transition-transform duration-300 group-hover:translate-x-1" /></>
                 )}

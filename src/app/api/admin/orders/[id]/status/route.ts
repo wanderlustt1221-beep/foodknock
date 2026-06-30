@@ -14,6 +14,9 @@ export const dynamic = "force-dynamic";
 // All loyalty writes are idempotent — clicking "Mark Delivered" a second
 // time is completely safe and simply logs a skip message.
 //
+// Order-delivered email (fire-and-forget at the route boundary) is fully
+// awaited internally inside its own try/catch.
+//
 // ── Auth ──────────────────────────────────────────────────────────────────
 // This route is admin-only.  It verifies the JWT and checks role === "admin"
 // before touching any data.
@@ -21,8 +24,11 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { connectDB }   from "@/lib/db";
 import Order           from "@/models/Order";
+import User            from "@/models/User";
 import { verifyToken } from "@/lib/auth";
 import { handleOrderDelivered } from "@/lib/loyaltyService";
+import { sendOrderDeliveredEmail } from "@/lib/mailer";
+import { notificationEngine } from "@/lib/notifications";
 
 // Valid status transitions in the order lifecycle
 const VALID_STATUSES = [
@@ -121,6 +127,70 @@ const order = await Order.findById(id);
         handleOrderDelivered(order._id.toString()).catch((err) => {
             console.error(`[loyalty] handleOrderDelivered failed for order ${order._id}:`, err);
         });
+
+        // ── Order-delivered email — only on the genuine transition ────────
+        // Guarded by previousStatus so a redundant re-click (already
+        // "delivered", admin clicks it again) never re-sends the email.
+        // Skipped for guest orders with no linked user (no email was ever
+        // collected at checkout in that case).
+        if (previousStatus !== "delivered" && order.user) {
+            try {
+                const freshUser = await User.findById(order.user).select("email name").lean() as { email?: string } | null;
+                const customerEmail = freshUser?.email;
+                if (customerEmail) {
+                    await sendOrderDeliveredEmail(customerEmail, {
+                        customerName: order.customerName,
+                        orderId:      order.orderId,
+                    });
+                }
+            } catch (err) {
+                console.error(`[email] order-delivered email failed for order ${order._id}:`, err);
+            }
+
+            // ── Push + WhatsApp via the existing Notification Engine ──────
+            // Same gate as email above (genuine transition, real linked
+            // user) — a guest order with no `order.user` has no push
+            // subscriptions and no phone to message either, exactly the
+            // same reason email is skipped for it.
+            //
+            // One emit() call. Push and WhatsApp both fire from it because
+            // notifications/engine.ts's own EVENT_DEFAULT_CHANNELS already
+            // maps "order.delivered" to ["push", "whatsapp"] — that mapping
+            // already existed before this change; nothing about channel
+            // selection lives in this route. The payload itself is built
+            // by the existing buildOrderDeliveredPayload in
+            // transactionalTemplates.ts (reused, not duplicated) — its
+            // `data: { orderId, customerName, kind: "order.delivered" }` is
+            // exactly what WhatsAppDeliveryProvider's own "order.delivered"
+            // case already reads to fill in the existing, already-approved
+            // template (review CTA included in that template itself — see
+            // whatsapp/templates.ts; nothing here builds or appends a URL).
+            //
+            // Phase 3.5 audit note: emit() returns void, not a Promise (see
+            // engine.ts) — this try/catch can only ever catch a SYNCHRONOUS
+            // throw from constructing/dispatching the event itself (verified
+            // directly: a failure inside the async work that follows, e.g. a
+            // provider erroring, becomes an unhandled rejection this block
+            // structurally cannot observe, regardless of whether it's
+            // wrapped in try/catch or not). That's fine — it's not this
+            // try/catch's job to isolate delivery failures; that's
+            // engine.ts's send() loop, which independently catches each
+            // provider's own exception per-channel (fixed in this same
+            // audit pass — see that file). This block mirrors the same
+            // try/catch-around-emit() convention already used identically
+            // in createOrderCore.ts and orders/[id]/route.ts, for the exact
+            // same reason: guarding this block's own construction of the
+            // event object, not the asynchronous delivery that follows it.
+            try {
+                notificationEngine.emit({
+                    name: "order.delivered",
+                    data: { orderId: order.orderId, customerName: order.customerName },
+                    target: { userId: order.user.toString() },
+                });
+            } catch (err) {
+                console.error(`[notify] order.delivered emit failed for order ${order._id}:`, err);
+            }
+        }
     }
 
     return NextResponse.json({
