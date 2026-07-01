@@ -68,6 +68,14 @@ export type FcmSendInput = {
      * sw.js's custom actions/image/click logic and let the browser render a
      * default notification shape instead — a data-only message keeps FCM
      * and raw Web Push producing byte-identical results on the client.
+     *
+     * IMPORTANT (confirmed via debug capture): FCM does NOT deliver this
+     * `data` object flat to the browser's Push API. The actual wire
+     * envelope the service worker's `push` event receives is
+     * { data: { payload: "<json-string>" }, fcmMessageId, priority, ... } —
+     * see public/sw.js's extractNotificationPayload() for the corresponding
+     * unwrap logic. This file's job is only to build the correct SEND
+     * request; sw.js is the one place that must know how to unwrap it.
      */
     payload: Record<string, unknown>;
     /** Used only for FCM's own click-through metadata (fcmOptions.link) — sw.js's own notificationclick handler is still what actually navigates. */
@@ -87,11 +95,6 @@ export type FcmSendResult =
 export async function sendFcmMessage(input: FcmSendInput): Promise<FcmSendResult> {
     try {
         const messaging = getMessagingInstance();
-
-        console.log("===============");
-console.log("FCM PAYLOAD");
-console.log(JSON.stringify(input.payload,null,2));
-console.log("===============");
 
         const messageId = await messaging.send({
             token: input.token,
